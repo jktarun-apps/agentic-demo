@@ -1,4 +1,4 @@
-name: Security Remediation Handoff
+name: "Security Remediation Handoff"
 on:
   pull_request:
     types:
