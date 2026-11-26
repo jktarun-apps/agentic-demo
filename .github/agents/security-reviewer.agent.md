@@ -1,10 +1,11 @@
 ---
 name: security-reviewer
-description: "Performs application security audits..."
+description: "Performs comprehensive application security audits and provides evidence-based vulnerability findings and remediation."
 target: github-copilot
 tools:
   - read
   - search
+  - execute
 ---
 
 # Security Review Agent
