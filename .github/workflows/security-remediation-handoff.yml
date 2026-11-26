@@ -1,1 +1,172 @@
+name: Security Remediation Handoff
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+
+permissions:
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: security-handoff-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  create-developer-handoff:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Process security remediation PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking PR #$PR_NUMBER"
+
+          # Only process explicitly marked security remediation PRs.
+          if ! grep -Fq '<!-- security-remediation: true -->' <<< "$PR_BODY"; then
+            echo "Not a security remediation PR. Skipping."
+            exit 0
+          fi
+
+          # Extract the original InfoSec issue reference.
+          SOURCE_LINE=$(grep -F '<!-- security-audit-source:' <<< "$PR_BODY" | head -n 1 || true)
+
+          if [[ -z "$SOURCE_LINE" ]]; then
+            echo "Missing security-audit-source metadata."
+            exit 1
+          fi
+
+          SOURCE="${SOURCE_LINE#*<!-- security-audit-source: }"
+          SOURCE="${SOURCE% -->}"
+
+          if [[ ! "$SOURCE" =~ ^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)$ ]]; then
+            echo "Invalid source issue reference: $SOURCE"
+            exit 1
+          fi
+
+          SOURCE_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+          SOURCE_ISSUE="${BASH_REMATCH[3]}"
+
+          # Prevent a PR from operating on an issue in another repository.
+          if [[ "$SOURCE_REPO" != "$REPOSITORY" ]]; then
+            echo "Source issue belongs to another repository. Stopping."
+            exit 1
+          fi
+
+          echo "Original InfoSec issue: #$SOURCE_ISSUE"
+
+          # Verify that the source exists and is an issue, not another PR.
+          SOURCE_DATA=$(gh api "repos/$REPOSITORY/issues/$SOURCE_ISSUE")
+
+          IS_PR=$(jq -r 'if .pull_request then "true" else "false" end' <<< "$SOURCE_DATA")
+          SOURCE_STATE=$(jq -r '.state' <<< "$SOURCE_DATA")
+
+          if [[ "$IS_PR" == "true" ]]; then
+            echo "Source reference points to a PR, not an issue."
+            exit 1
+          fi
+
+          if [[ "$SOURCE_STATE" != "open" ]]; then
+            echo "Original issue is already closed. No handoff changes made."
+            exit 0
+          fi
+
+          # Unique marker prevents duplicate developer issues for this PR.
+          HANDOFF_MARKER="<!-- security-handoff-source-pr: $REPOSITORY#$PR_NUMBER -->"
+
+          EXISTING_ISSUE=$(
+            gh issue list \
+              --repo "$REPOSITORY" \
+              --state all \
+              --limit 1000 \
+              --json number,body |
+            jq -r --arg marker "$HANDOFF_MARKER" \
+              '[.[] | select((.body // "") | contains($marker)) | .number] | .[0] // empty'
+          )
+
+          if [[ -n "$EXISTING_ISSUE" ]]; then
+            echo "Developer handoff issue already exists: #$EXISTING_ISSUE"
+            HANDOFF_NUMBER="$EXISTING_ISSUE"
+            HANDOFF_URL=$(gh issue view "$HANDOFF_NUMBER" --repo "$REPOSITORY" --json url --jq '.url')
+          else
+            echo "Creating developer handoff issue."
+
+            HANDOFF_TITLE="Developer Review: $PR_TITLE"
+
+            HANDOFF_BODY=$(cat <<EOF
+          ## Security remediation ready for developer review
+
+          A security remediation Pull Request has been created and requires developer review.
+
+          ### Pull Request
+          - **PR:** [$PR_TITLE]($PR_URL)
+          - **PR number:** #$PR_NUMBER
+          - **Branch:** \`$PR_BRANCH\`
+
+          ### Original InfoSec issue
+          - **Issue:** #$SOURCE_ISSUE
+
+          ### Developer actions
+          1. Review the remediation changes.
+          2. Verify the regression tests and validation results.
+          3. Check for unintended application behavior changes.
+          4. Request changes or approve the PR as appropriate.
+          5. Merge only after completing the required review.
+
+          This issue remains open until developer review is complete.
+
+          $HANDOFF_MARKER
+          EOF
+          )
+
+            HANDOFF_URL=$(gh issue create \
+              --repo "$REPOSITORY" \
+              --title "$HANDOFF_TITLE" \
+              --body "$HANDOFF_BODY")
+
+            HANDOFF_NUMBER="${HANDOFF_URL##*/}"
+
+            if [[ ! "$HANDOFF_NUMBER" =~ ^[0-9]+$ ]]; then
+              echo "Could not determine the created developer issue number."
+              exit 1
+            fi
+
+            echo "Created developer issue #$HANDOFF_NUMBER"
+          fi
+
+          # Comment and close the original issue only after handoff exists.
+          COMMENT=$(cat <<EOF
+          Security remediation has been handed off for developer review.
+
+          - **Remediation PR:** $PR_URL
+          - **Developer review issue:** $HANDOFF_URL
+
+          The developer review issue remains open for code review and completion.
+
+          This InfoSec review issue is being closed because the remediation has been handed off, not because production remediation is confirmed complete.
+          EOF
+          )
+
+          gh issue close "$SOURCE_ISSUE" \
+            --repo "$REPOSITORY" \
+            --comment "$COMMENT"
+
+          echo "Successfully handed off PR #$PR_NUMBER."
+          echo "Developer issue: $HANDOFF_URL"
+          echo "Closed original InfoSec issue #$SOURCE_ISSUE."
 
