@@ -17,10 +17,7 @@ def search():
     cursor.execute("CREATE TABLE users (username TEXT)")
     cursor.execute("INSERT INTO users VALUES ('demo-user')")
 
-    # Intentionally vulnerable SQL query for demonstration
-    query = "SELECT * FROM users WHERE username = '" + username + "'"
-
-    cursor.execute(query)
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
     result = cursor.fetchall()
 
     connection.close()
