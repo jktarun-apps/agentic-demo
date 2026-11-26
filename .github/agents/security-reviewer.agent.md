@@ -1,20 +1,10 @@
 ---
-on:
-  issues:
-    types: [labeled]
-    names: [security-audit]
-
-permissions:
-  contents: read
-  issues: read
-  copilot-requests: write
-
-engine: copilot
-
-safe-outputs:
-  add-comment:
-    max: 1
-
+name: security-reviewer
+description: "Performs application security audits..."
+target: github-copilot
+tools:
+  - read
+  - search
 ---
 
 # Security Review Agent
